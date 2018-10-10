@@ -17,7 +17,7 @@ config_test:
 
 configure:
 	( cd $(SRC_NAME) ; \
-	autoreconf -v \
+	autoreconf -v ; \
 	LD="$(CC)" \
 	./configure \
 		--prefix=/usr \
