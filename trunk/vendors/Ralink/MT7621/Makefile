@@ -19,6 +19,7 @@ ROMFS_DIRS	= \
 	etc_ro etc_ro/ppp/peers etc_ro/ppp/plugins etc_ro/ppp/3g \
 		etc_ro/Wireless etc_ro/Wireless \
 	lib lib/modules \
+	nfs \
 	mnt \
 	media \
 	opt \
