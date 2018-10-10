@@ -79,7 +79,7 @@ void (*_dropbear_exit)(int exitcode, const char* format, va_list param) ATTRIB_N
 void (*_dropbear_log)(int priority, const char* format, va_list param)
 						= generic_dropbear_log;
 
-#ifdef DEBUG_TRACE
+#if DEBUG_TRACE
 int debug_trace = 0;
 #endif
 
@@ -120,6 +120,13 @@ static void generic_dropbear_exit(int exitcode, const char* format,
 
 	_dropbear_log(LOG_INFO, fmtbuf, param);
 
+#if DROPBEAR_FUZZ
+	/* longjmp before cleaning up svr_opts */
+    if (fuzz.do_jmp) {
+        longjmp(fuzz.jmp, 1);
+    }
+#endif
+
 	exit(exitcode);
 }
 
@@ -149,7 +156,7 @@ void dropbear_log(int priority, const char* format, ...) {
 }
 
 
-#ifdef DEBUG_TRACE
+#if DEBUG_TRACE
 
 static double debug_start_time = -1;
 
@@ -214,7 +221,7 @@ void dropbear_trace2(const char* format, ...) {
 #endif /* DEBUG_TRACE */
 
 /* Connect to a given unix socket. The socket is blocking */
-#ifdef ENABLE_CONNECT_UNIX
+#if ENABLE_CONNECT_UNIX
 int connect_unix(const char* path) {
 	struct sockaddr_un addr;
 	int fd = -1;
@@ -241,7 +248,7 @@ int connect_unix(const char* path) {
  * it will be run after the child has fork()ed, and is passed exec_data.
  * If ret_errfd == NULL then stderr will not be captured.
  * ret_pid can be passed as  NULL to discard the pid. */
-int spawn_command(void(*exec_fn)(void *user_data), void *exec_data,
+int spawn_command(void(*exec_fn)(const void *user_data), const void *exec_data,
 		int *ret_writefd, int *ret_readfd, int *ret_errfd, pid_t *ret_pid) {
 	int infds[2];
 	int outfds[2];
@@ -262,7 +269,7 @@ int spawn_command(void(*exec_fn)(void *user_data), void *exec_data,
 		return DROPBEAR_FAILURE;
 	}
 
-#ifdef USE_VFORK
+#if DROPBEAR_VFORK
 	pid = vfork();
 #else
 	pid = fork();
@@ -371,7 +378,7 @@ void run_shell_command(const char* cmd, unsigned int maxfd, char* usershell) {
 	execv(usershell, argv);
 }
 
-#ifdef DEBUG_TRACE
+#if DEBUG_TRACE
 void printhex(const char * label, const unsigned char * buf, int len) {
 
 	int i;
@@ -392,6 +399,7 @@ void printhex(const char * label, const unsigned char * buf, int len) {
 void printmpint(const char *label, mp_int *mp) {
 	buffer *buf = buf_new(1000);
 	buf_putmpint(buf, mp);
+	fprintf(stderr, "%d bits ", mp_count_bits(mp));
 	printhex(label, buf->data, buf->len);
 	buf_free(buf);
 
@@ -465,7 +473,7 @@ out:
  * authkeys file.
  * Will return DROPBEAR_SUCCESS if data is read, or DROPBEAR_FAILURE on EOF.*/
 /* Only used for ~/.ssh/known_hosts and ~/.ssh/authorized_keys */
-#if defined(DROPBEAR_CLIENT) || defined(ENABLE_SVR_PUBKEY_AUTH)
+#if DROPBEAR_CLIENT || DROPBEAR_SVR_PUBKEY_AUTH
 int buf_getline(buffer * line, FILE * authfile) {
 
 	int c = EOF;
@@ -506,7 +514,7 @@ out:
 void m_close(int fd) {
 	int val;
 
-	if (fd == -1) {
+	if (fd < 0) {
 		return;
 	}
 
@@ -520,48 +528,15 @@ void m_close(int fd) {
 	}
 }
 	
-void * m_malloc(size_t size) {
-
-	void* ret;
-
-	if (size == 0) {
-		dropbear_exit("m_malloc failed");
-	}
-	ret = calloc(1, size);
-	if (ret == NULL) {
-		dropbear_exit("m_malloc failed");
-	}
-	return ret;
-
-}
-
-void * m_strdup(const char * str) {
-	char* ret;
-
-	ret = strdup(str);
-	if (ret == NULL) {
-		dropbear_exit("m_strdup failed");
-	}
-	return ret;
-}
-
-void * m_realloc(void* ptr, size_t size) {
-
-	void *ret;
-
-	if (size == 0) {
-		dropbear_exit("m_realloc failed");
-	}
-	ret = realloc(ptr, size);
-	if (ret == NULL) {
-		dropbear_exit("m_realloc failed");
-	}
-	return ret;
-}
-
 void setnonblocking(int fd) {
 
 	TRACE(("setnonblocking: %d", fd))
+
+#if DROPBEAR_FUZZ
+	if (fuzz.fuzzing) {
+		return;
+	}
+#endif
 
 	if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
 		if (errno == ENODEV) {
@@ -569,7 +544,9 @@ void setnonblocking(int fd) {
 			 * can't be set to non-blocking */
 			TRACE(("ignoring ENODEV for setnonblocking"))
 		} else {
+		{
 			dropbear_exit("Couldn't set nonblocking");
+		}
 		}
 	}
 	TRACE(("leave setnonblocking"))
@@ -634,6 +611,10 @@ reach userspace include headers */
 #ifndef CLOCK_MONOTONIC_COARSE
 #define CLOCK_MONOTONIC_COARSE 6
 #endif
+/* Some old toolchains know SYS_clock_gettime but not CLOCK_MONOTONIC */
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
 static clockid_t get_linux_clock_source() {
 	struct timespec ts;
 	if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC_COARSE, &ts) == 0) {
@@ -648,7 +629,14 @@ static clockid_t get_linux_clock_source() {
 #endif 
 
 time_t monotonic_now() {
+#if DROPBEAR_FUZZ
+	if (fuzz.fuzzing) {
+		/* time stands still when fuzzing */
+		return 5;
+	}
+#endif
 #if defined(__linux__) && defined(SYS_clock_gettime)
+	{
 	static clockid_t clock_source = -2;
 
 	if (clock_source == -2) {
@@ -665,9 +653,11 @@ time_t monotonic_now() {
 		}
 		return ts.tv_sec;
 	}
+	}
 #endif /* linux clock_gettime */
 
 #if defined(HAVE_MACH_ABSOLUTE_TIME)
+	{
 	/* OS X, see https://developer.apple.com/library/mac/qa/qa1398/_index.html */
 	static mach_timebase_info_data_t timebase_info;
 	if (timebase_info.denom == 0) {
@@ -675,6 +665,7 @@ time_t monotonic_now() {
 	}
 	return mach_absolute_time() * timebase_info.numer / timebase_info.denom
 		/ 1e9;
+	}
 #endif /* osx mach_absolute_time */
 
 	/* Fallback for everything else - this will sometimes go backwards */
@@ -696,6 +687,6 @@ void fsync_parent_dir(const char* fn) {
 		TRACE(("error opening directory %s for fsync: %s", dir, strerror(errno)))
 	}
 
-	free(fn_dir);
+	m_free(fn_dir);
 #endif
 }
